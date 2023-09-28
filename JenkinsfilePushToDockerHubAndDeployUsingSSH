@@ -1,0 +1,67 @@
+pipeline {
+    agent none
+    environment {
+        DOCKERHUB_CREDENTIALS = credentials('DockerLogin')
+    }
+    options {
+        skipStagesAfterUnstable()
+    }
+    stages {
+        stage('Build') {
+            agent {
+                docker {
+                    image 'maven:3.9.4-eclipse-temurin-17-alpine'
+                    args '-v /root/.m2:/root/.m2'
+                }
+            }
+            steps {
+                sh 'mvn -B -DskipTests clean package'
+            }
+        }
+        stage('Test') {
+            agent {
+                docker {
+                    image 'maven:3.9.4-eclipse-temurin-17-alpine'
+                    args '-v /root/.m2:/root/.m2'
+                }
+            }
+            steps {
+                sh 'mvn test'
+            }
+            post {
+                always {
+                    junit 'target/surefire-reports/*.xml'
+                }
+            }
+        }
+        stage('Build Docker Image and Push to Docker Registry') {
+            agent {
+                docker {
+                    image 'docker:dind'
+                    args '--user root --network host -v /var/run/docker.sock:/var/run/docker.sock'
+                }
+            }
+            steps {
+                sh 'echo $DOCKERHUB_CREDENTIALS_PSW | docker login -u $DOCKERHUB_CREDENTIALS_USR --password-stdin'
+                sh 'docker build -t xenjutsu/vulnerable-spring-boot-application:0.1 .'
+                sh 'docker push xenjutsu/vulnerable-spring-boot-application:0.1'
+            }
+        }
+        stage('Deploy Docker Image') {
+            agent {
+                docker {
+                    image 'kroniak/ssh-client'
+                    args '--user root --network host'
+                }
+            }
+            steps {
+                withCredentials([sshUserPrivateKey(credentialsId: "DeploymentSSHKey", keyFileVariable: 'keyfile')]) {
+                    sh 'ssh -i ${keyfile} -o StrictHostKeyChecking=no jenkins@192.168.0.104 "echo $DOCKERHUB_CREDENTIALS_PSW | docker login -u $DOCKERHUB_CREDENTIALS_USR --password-stdin"'
+                    sh 'ssh -i ${keyfile} -o StrictHostKeyChecking=no jenkins@192.168.0.104 docker pull xenjutsu/vulnerable-spring-boot-application:0.1'
+                    sh 'ssh -i ${keyfile} -o StrictHostKeyChecking=no jenkins@192.168.0.104 docker rm --force vulnerable-spring-boot-application'
+                    sh 'ssh -i ${keyfile} -o StrictHostKeyChecking=no jenkins@192.168.0.104 docker run -it --detach -p 8000:8000 --name vulnerable-spring-boot-application xenjutsu/vulnerable-spring-boot-application:0.1'
+                }
+            }
+        }
+    }
+}
